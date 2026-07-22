@@ -446,10 +446,10 @@ async def _features(tmpdir) -> None:
         await pilot.pause()
         await pilot.pause()
         assert appSc.editor.scroll_y > 0, "l'éditeur ne suit pas le scroll de la preview"
-        # bordure bleue quand l'éditeur est actif
+        # indicateur de focus (bordure accent) quand l'éditeur est actif
         appSc.editor.focus()
         await pilot.pause()
-        assert pv.has_class("editor-focused"), "la preview doit passer en bleu quand l'éditeur est actif"
+        assert appSc.editor.has_focus, "l'éditeur doit avoir le focus (bordure accent)"
         # toggle off -> plus de sync
         appSc.action_toggle_scroll_sync()
         await pilot.pause()
@@ -571,7 +571,7 @@ async def _features(tmpdir) -> None:
         await pilot.pause()
         appI.filetree.focus()
         await pilot.pause()
-        assert appI.sidebar.has_class("tree-focused"), "sidebar doit passer en jaune quand focus"
+        assert appI.filetree.has_focus, "l'arbre doit avoir le focus (sidebar en accent via :focus-within)"
         # undo / redo sur Ctrl+Z / Ctrl+Shift+Z
         e.focus()
         await pilot.pause()
@@ -638,6 +638,34 @@ async def _features(tmpdir) -> None:
         em.action_toggle_comment()
         await pilot.pause()
         assert em.document.get_line(0) == "<!-- texte -->", f"texte md -> HTML: {em.document.get_line(0)!r}"
+
+    # --- Cyclage de focus entre panneaux + Échap depuis la preview
+    appFc = SdfApp(path=str(doc))
+    async with appFc.run_test(size=(100, 25)) as pilot:
+        await pilot.pause()
+
+        def focused_panel():
+            fo = appFc.focused
+            for name, w in (("editor", appFc.editor), ("preview", appFc.preview_scroll),
+                            ("tree", appFc.filetree)):
+                if fo is not None and w in fo.ancestors_with_self:
+                    return name
+            return None
+
+        appFc.editor.focus()
+        await pilot.pause()
+        appFc.action_cycle_focus()
+        await pilot.pause()
+        assert focused_panel() == "preview", "cycle focus editor -> preview KO"
+        appFc.action_cycle_focus()
+        await pilot.pause()
+        assert focused_panel() == "editor", "cycle focus preview -> editor KO"
+        # Échap depuis la preview ne reste pas coincé
+        appFc.preview_scroll.focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert focused_panel() == "editor", "Échap depuis preview doit revenir à l'éditeur"
 
 
 if __name__ == "__main__":

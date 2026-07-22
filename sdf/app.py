@@ -435,9 +435,9 @@ ROTATIONS = [("horizontal", False), ("vertical", False),
 ROTATION_LABELS = ["left", "top", "right", "bottom"]  # where the editor sits
 
 # Shortcut hint boxes (rendered with console markup).
-GENERAL_HINTS = ("[b]^S[/b] Save  [b]^E[/b] Files  [b]^F[/b] View  [b]^B[/b] Rotate  "
-                 "[b]^W[/b] Ratio  [b]^O[/b] Mode  [b]^P[/b] Palette  [b]^Q[/b]/[b]^C^C[/b] Quit")
-BROWSER_HINTS = ("[b]Enter[/b] Open  [b]->/<-[/b] Expand  [b]Del[/b] Up  [b]^H[/b] Hidden  "
+GENERAL_HINTS = ("[b]^s[/b] Save  [b]^e[/b] Files  [b]^g[/b] Focus  [b]^f[/b] View  "
+                 "[b]^b[/b] Rotate  [b]^w[/b] Ratio  [b]^o[/b] Mode  [b]^p[/b] Palette  [b]^q[/b] Quit")
+BROWSER_HINTS = ("[b]Enter[/b] Open  [b]->/<-[/b] Expand  [b]Del[/b] Up  [b]^h[/b] Hidden  "
                  "[b]n[/b] New  [b]d[/b] Dir  [b]r[/b] Rename  [b]Esc[/b] Close")
 
 # File extension -> tree-sitter language name (built-in Textual set + language pack).
@@ -538,7 +538,7 @@ class SdfApp(App):
         background: $surface;
         display: none;
     }
-    #sidebar.tree-focused {
+    #sidebar:focus-within {
         border: round $accent;
         border-title-color: $accent;
     }
@@ -572,16 +572,15 @@ class SdfApp(App):
     #preview {
         width: 1fr; height: 1fr;
         margin-left: 1;
-        border: round $accent;
+        border: round $primary;
         border-title-color: $accent;
         border-title-style: bold;
         padding: 0 1;
         background: $surface;
     }
-    /* Blue outline on the preview while the editor is the active pane. */
-    #preview.editor-focused {
-        border: round $primary;
-        border-title-color: $primary;
+    /* Focused pane gets a bright accent outline (like the editor). */
+    #preview:focus, #preview:focus-within {
+        border: round $accent;
     }
     #preview-md { height: auto; background: $surface; }
 
@@ -701,6 +700,10 @@ class SdfApp(App):
         Binding("ctrl+c", "request_quit", "Quit", priority=True, show=False),
         # Panels
         Binding("ctrl+e", "toggle_tree", "Files", priority=True),
+        # Ctrl+Tab is indistinguishable from Tab in a terminal, so use Ctrl+G / F6.
+        Binding("ctrl+g", "cycle_focus", "Focus", priority=True),
+        Binding("f6", "cycle_focus", "Focus", priority=True, show=False),
+        Binding("escape", "focus_editor", "Editor", show=False),
         # Layout / appearance
         Binding("ctrl+f", "cycle_view", "View", priority=True),
         Binding("ctrl+b", "rotate", "Rotate", priority=True),
@@ -766,6 +769,7 @@ class SdfApp(App):
         self.editor = self.query_one("#editor", CodeEditor)
         self.preview = self.query_one("#preview-md", Markdown)
         self.preview_scroll = self.query_one("#preview", VerticalScroll)
+        self.preview_scroll.can_focus = True   # so focus can cycle into the preview
         self.filetree = self.query_one("#tree", FlatTree)
         self.filetree.show_root = True   # the root node is our selectable ".."
         self.filetree.guide_depth = 2
@@ -820,13 +824,6 @@ class SdfApp(App):
 
     def _sync_from_preview(self, *_) -> None:
         self._sync_scroll(self.preview_scroll, self.editor)
-
-    # ------------------------------------------------------------- focus
-    def on_descendant_focus(self, event) -> None:
-        """Focus indicators: preview goes blue while the editor is active; the file
-        browser outline goes yellow while it is focused."""
-        self.preview_scroll.set_class(event.widget is self.editor, "editor-focused")
-        self.sidebar.set_class(event.widget is self.filetree, "tree-focused")
 
     def get_system_commands(self, screen: Screen):
         """Palette commands: drop Screenshot and Maximize/Minimize (the View cycle
@@ -1227,7 +1224,7 @@ class SdfApp(App):
         self._view_mode = VIEW_MODES[(VIEW_MODES.index(self._view_mode) + 1) % len(VIEW_MODES)]
         self._apply_layout()
         if self._view_mode == "preview":
-            self.preview.focus()
+            self.preview_scroll.focus()
         else:
             self.editor.focus()
         self.notify(f"View: {self._view_mode}", timeout=1.5)
@@ -1262,6 +1259,33 @@ class SdfApp(App):
         """Close the file browser (Esc from inside it)."""
         if self.sidebar.display:
             self.action_toggle_tree()
+
+    def action_focus_editor(self) -> None:
+        """Escape from the preview returns to the editor (never get stuck there)."""
+        if self.focused is not None and self.preview_scroll in self.focused.ancestors_with_self:
+            if self.editor.display:
+                self.editor.focus()
+            else:
+                self.action_cycle_view()  # preview-only: bring the editor back
+
+    def action_cycle_focus(self) -> None:
+        """Move focus to the next visible panel (browser -> editor -> preview)."""
+        panels = []
+        if self.sidebar.display:
+            panels.append(self.filetree)
+        if self.editor.display:
+            panels.append(self.editor)
+        if self.preview_scroll.display:
+            panels.append(self.preview_scroll)
+        if not panels:
+            return
+        focused = self.focused
+        current = -1
+        for i, panel in enumerate(panels):
+            if focused is not None and panel in focused.ancestors_with_self:
+                current = i
+                break
+        panels[(current + 1) % len(panels)].focus()
 
     def action_toggle_conflict_mode(self) -> None:
         self.conflict_mode = "prompt" if self.conflict_mode == "auto" else "auto"
