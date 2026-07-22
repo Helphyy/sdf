@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdf"
+version = "1.0.0"
+description = "sdf (Simple Draft Frame): terminal markdown editor/preview that reloads on external changes."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = [
+    "textual[syntax]>=0.80",
+    "tree-sitter-language-pack>=0.9",
+    "pypdf>=4",
+]
+
+[project.scripts]
+sdf = "sdf.cli:main"
+
+[tool.setuptools]
+packages = ["sdf"]
+
+[tool.setuptools.package-data]
+sdf = ["example.md"]
