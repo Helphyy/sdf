@@ -25,6 +25,10 @@ uncluttered. Use `Right` when you just want to peek inside without changing the 
 | `n` | New file (in the selected folder, or the current directory) |
 | `d` | New folder |
 | `r` | Rename the selected file or folder |
+| `i` | Info popup: type, size, line count, last modified, permissions |
+
+`i` opens a read-only popup about the highlighted entry (on the `..` root it describes
+the current folder); close it with `Esc`, `Enter` or `i`.
 
 New file / folder and rename open a small prompt. Renaming the file you currently have
 open updates the editor to follow it.

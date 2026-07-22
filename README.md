@@ -21,7 +21,11 @@ It edits in place, creates no stray directory, and keeps your settings under
 - **Per-file-type preview**: markdown renders, PDF shows its extracted text, everything
   else hides the preview and goes full editor.
 - **Real editing commands**: mass indent/comment, delete line, auto-surround, undo/redo.
-- **A file browser** with create / rename / navigate, and a command palette.
+- **Insert markdown tags** from the palette (wrapping the current selection when there is
+  one), with a file picker for links/images that writes the path relative to the document
+  (`./sub/img.png`, `../img.png`).
+- **A file browser** with create / rename / navigate, an `i` info popup, and a command
+  palette.
 - **Themeable, persistent, transparent-capable**, entirely from the keyboard.
 
 Pure `pipx` install, only pip dependencies, no external binaries.
@@ -48,12 +52,15 @@ A non-existent file opens on an empty buffer and is created on first save.
 
 ## Highlights
 
-- `Ctrl+E` file browser · `Ctrl+F` view (split / full editor / full viewer) ·
-  `Ctrl+B` rotate the split · `Ctrl+W` width ratio · `Ctrl+P` command palette.
+- `Ctrl+R` search (vim-like: type, then `n` / `p` / `Esc`) · `Ctrl+E` file browser ·
+  `Ctrl+F` view (split / editor / max editor / viewer / max viewer, where `max` hides the
+  header and hint bar) ·
+  `Ctrl+B` rotate the split · `Ctrl+W` width · `Ctrl+P` command palette.
 - Select lines and `Tab` / `Shift+Tab` to indent / dedent them all; `Ctrl+/`
   (or `Ctrl+:` on AZERTY) to comment / uncomment per language.
 - Select text and type `*`, `` ` ``, `~`, `(` ... to wrap it (`*` cycles
-  none → italic → bold → none).
+  none → italic → bold → none). `Ctrl+C` copies the selection, `Ctrl+V` pastes,
+  `Ctrl+X` cuts.
 - The preview turns a single newline into a real line break, labels each code fence
   with its language, and renders task lists with proper checkboxes.
 

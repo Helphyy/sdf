@@ -7,11 +7,11 @@ that reloads when another process edits the open file.
 
 ## Contents
 
-- [Keybindings](keybindings.md) — every shortcut (global, browser, editor).
-- [File browser](file-browser.md) — navigation and file operations.
-- [Preview & rendering](preview.md) — per-file-type preview, markdown rendering,
+- [Keybindings](keybindings.md): every shortcut (global, browser, editor).
+- [File browser](file-browser.md): navigation and file operations.
+- [Preview & rendering](preview.md): per-file-type preview, markdown rendering,
   scroll sync, syntax highlighting.
-- [Configuration & persistence](configuration.md) — themes, transparency, conflict
+- [Configuration & persistence](configuration.md): themes, transparency, conflict
   modes, the config file.
 
 ## Install
@@ -26,12 +26,12 @@ pipx install git+https://github.com/Helphyy/sdf.git
 sdf [file] [--example] [--version] [--conflict {auto,prompt}] [--theme NAME] [--transparent]
 ```
 
-- `file` — markdown file to open (created on save if missing).
-- `--example` — open the bundled example.
-- `--version` / `-v` — print the version.
-- `--conflict` — external-change behavior for this session (default: from config).
-- `--theme` — Textual theme for this session (gruvbox, nord, dracula, ...).
-- `--transparent` — transparent UI for this session.
+- `file`: markdown file to open (created on save if missing).
+- `--example`: open the bundled example.
+- `--version` / `-v`: print the version.
+- `--conflict`: external-change behavior for this session (default: from config).
+- `--theme`: Textual theme for this session (gruvbox, nord, dracula, ...).
+- `--transparent`: transparent UI for this session.
 
 ## Conflict modes
 

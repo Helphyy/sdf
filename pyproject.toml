@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sdf"
-version = "1.0.1"
+version = "1.0.2"
 description = "SDF (Simple Draft Frame): terminal markdown editor/preview that reloads on external changes."
 readme = "README.md"
 requires-python = ">=3.9"

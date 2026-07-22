@@ -42,6 +42,6 @@ The preview outline turns blue while the editor is the active pane.
 
 - `Ctrl+F` cycles split → full editor → full viewer (maximizing either pane).
 - `Ctrl+B` rotates the split a quarter turn (editor left / top / right / bottom).
-- `Ctrl+W` cycles the width ratio 75/25 → 50/50 → 25/75.
+- `Ctrl+W` cycles the width 75/25 → 50/50 → 25/75.
 
-The editor border shows a `[position] [ratio]` indicator.
+The editor border shows a `[position] [width]` indicator.

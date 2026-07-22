@@ -8,7 +8,10 @@ Edits in place, creates no stray directory. User settings persist under
 
 from __future__ import annotations
 
+import os
 import re
+import stat as stat_mod
+from datetime import datetime
 from pathlib import Path
 
 from markdown_it import MarkdownIt
@@ -21,7 +24,9 @@ from textual.command import DiscoveryHit, Hits
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.system_commands import SystemCommandsProvider
-from textual.widgets import DirectoryTree, Header, Input, Label, Markdown, Static, TextArea
+from textual.widgets import (
+    DirectoryTree, Header, Input, Label, ListItem, ListView, Markdown, Static, TextArea,
+)
 from textual.widgets._markdown import MarkdownFence
 from textual.widgets.text_area import Selection, TextAreaTheme
 
@@ -239,8 +244,8 @@ class SdfCommands(SystemCommandsProvider):
     """Command palette provider ordered logically instead of alphabetically."""
 
     # (title prefix, rank); lower = higher in the list, Quit last.
-    ORDER = [("Theme", 0), ("Transparency", 1), ("Scroll sync", 2),
-             ("Toggle comment", 3), ("Keys", 4), ("Quit", 99)]
+    ORDER = [("Insert markdown", -1), ("Theme", 0), ("Transparency", 1), ("Scroll sync", 2),
+             ("Toggle comment", 4), ("Keys", 5), ("Quit", 99)]
 
     @classmethod
     def rank(cls, title: str) -> int:
@@ -268,6 +273,44 @@ except Exception:  # pragma: no cover
     _pypdf = None
 
 MARKDOWN_EXTS = {".md", ".markdown", ".mdown", ".mkd", ".mdwn"}
+
+# Markdown snippets for the "Insert markdown tag" palette command. The value is the
+# text inserted at the cursor; "@link" / "@image" first open a file picker and the
+# chosen path is written relative to the markdown file.
+MARKDOWN_TAGS = [
+    ("Unordered List", "- item"),
+    ("Ordered List", "1. item"),
+    ("Link", "@link"),
+    ("Image", "@image"),
+    ("Horizontal Rule", "\n---\n"),
+    ("Table", "| Column 1 | Column 2 |\n| --- | --- |\n| a | b |\n"),
+    ("Task List", "- [ ] task"),
+    ("Heading", "# Heading"),
+    ("Bold", "**bold**"),
+    ("Italic", "*italic*"),
+    ("Inline Code", "`code`"),
+    ("Code Block", "```\n\n```"),
+    ("Blockquote", "> quote"),
+    ("Footnote", "[^1]\n\n[^1]: note"),
+]
+_MD_TAG_MAP = dict(MARKDOWN_TAGS)
+# One-line syntax preview shown next to each tag (we have the room).
+_MD_TAG_PREVIEW = {
+    "Unordered List": "- item",
+    "Ordered List": "1. item",
+    "Link": "[text](url)",
+    "Image": "![alt](url)",
+    "Horizontal Rule": "---",
+    "Table": "| a | b |",
+    "Task List": "- [ ] task",
+    "Heading": "# Heading",
+    "Bold": "**bold**",
+    "Italic": "*italic*",
+    "Inline Code": "`code`",
+    "Code Block": "```lang```",
+    "Blockquote": "> quote",
+    "Footnote": "[^1]",
+}
 
 
 def _soft_as_hard(md: MarkdownIt) -> None:
@@ -346,6 +389,7 @@ class FlatTree(DirectoryTree):
         Binding("n", "app.tree_new_file", "New file"),
         Binding("d", "app.tree_new_dir", "New dir"),
         Binding("r", "app.tree_rename", "Rename"),
+        Binding("i", "app.tree_info", "Info"),
     ]
 
     def filter_paths(self, paths):
@@ -424,10 +468,167 @@ class PromptScreen(ModalScreen[str]):
         self.dismiss("")
 
 
+def _human_size(n: int) -> str:
+    """Human-readable byte count (B, KB, MB, ...)."""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _file_info_lines(path: Path):
+    """Build (is_dir, [(label, value), ...]) about a file or folder for InfoScreen."""
+    rows = [("Name", path.name or str(path)), ("Path", str(path))]
+    try:
+        st = path.stat()
+    except OSError as exc:
+        rows.append(("Error", str(exc)))
+        return path.is_dir(), rows
+    is_dir = path.is_dir()
+    if is_dir:
+        rows.append(("Type", "Folder"))
+        try:
+            rows.append(("Items", str(sum(1 for _ in path.iterdir()))))
+        except OSError:
+            pass
+    else:
+        suffix = path.suffix.lower()
+        lang = EXT_LANG.get(suffix) or NAME_LANG.get(path.name)
+        rows.append(("Type", f"File ({lang})" if lang else "File"))
+        rows.append(("Size", _human_size(st.st_size)))
+        if 0 < st.st_size <= 5_000_000:      # count lines for reasonably-sized text files
+            try:
+                text = path.read_bytes().decode("utf-8", errors="strict")
+                rows.append(("Lines", str(text.count("\n") + (0 if text.endswith("\n") or not text else 1))))
+            except (OSError, UnicodeDecodeError):
+                rows.append(("Lines", "binary"))
+    rows.append(("Modified", datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")))
+    rows.append(("Perms", f"{stat_mod.filemode(st.st_mode)}  ({oct(st.st_mode & 0o777)[2:]})"))
+    return is_dir, rows
+
+
+class InfoScreen(ModalScreen[None]):
+    """Read-only popup with details about the selected file or folder."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("i", "close", "Close"),
+        Binding("enter", "close", "Close"),
+    ]
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = path
+
+    def compose(self) -> ComposeResult:
+        is_dir, rows = _file_info_lines(self._path)
+        width = max((len(label) for label, _ in rows), default=0)
+        body = "\n".join(
+            f"[b]{(label + ':').ljust(width + 1)}[/b]  {escape(str(value))}" for label, value in rows
+        )
+        dialog = Container(id="dialog")
+        dialog.border_title = "Folder info" if is_dir else "File info"
+        with dialog:
+            yield Static(body, classes="info")
+            yield Label("[b]Esc[/b] close", classes="dhint")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class MarkdownTagScreen(ModalScreen[str]):
+    """Pick a markdown snippet to insert (list, link, image, table, ...)."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        dialog = Container(id="dialog")
+        dialog.border_title = "Insert markdown tag"
+        items = []
+        for i, (label, _) in enumerate(MARKDOWN_TAGS):
+            preview = escape(_MD_TAG_PREVIEW.get(label, ""))
+            items.append(ListItem(Label(f"{label.ljust(16)}[dim]{preview}[/dim]"), id=f"mdtag-{i}"))
+        with dialog:
+            yield Static("...", id="tag-more-top")
+            yield ListView(*items, id="tag-list")
+            yield Static("...", id="tag-more-bottom")
+            yield Label("[b]Enter[/b] insert     [b]Esc[/b] cancel", classes="dhint")
+
+    def on_mount(self) -> None:
+        lv = self.query_one(ListView)
+        lv.focus()
+        self.watch(lv, "scroll_y", self._update_scroll_hint, init=False)
+        self.call_after_refresh(self._update_scroll_hint)
+
+    def _update_scroll_hint(self, *_) -> None:
+        """Replace the side scrollbar with '...' at the top/bottom to show more rows."""
+        lv = self.query_one(ListView)
+        self.query_one("#tag-more-top").display = lv.scroll_y > 0.5
+        self.query_one("#tag-more-bottom").display = lv.scroll_y < lv.max_scroll_y - 0.5
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        idx = event.list_view.index
+        if idx is not None:
+            self.dismiss(MARKDOWN_TAGS[idx][0])
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
+
+
+class FilePickScreen(ModalScreen[Path]):
+    """Modal file browser: navigate and pick a file (for a link/image path)."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("backspace", "go_up", "Up"),
+        Binding("delete", "go_up", "Up"),
+    ]
+
+    def __init__(self, start_dir: Path) -> None:
+        super().__init__()
+        self._start = start_dir if start_dir.is_dir() else start_dir.parent
+
+    def compose(self) -> ComposeResult:
+        dialog = Container(id="dialog")
+        dialog.border_title = "Pick a file"
+        with dialog:
+            yield Label("Enter open/select, Backspace up, Esc cancel", classes="dhint")
+            yield DirectoryTree(str(self._start), id="pick-tree")
+
+    def on_mount(self) -> None:
+        self.query_one(DirectoryTree).focus()
+
+    def action_go_up(self) -> None:
+        tree = self.query_one(DirectoryTree)
+        parent = Path(tree.path).parent
+        if parent != Path(tree.path):
+            tree.path = str(parent)
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        self.dismiss(Path(event.path))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SearchNav(Static, can_focus=True):
+    """Search-status line that holds focus during navigation so n / p / Esc work
+    (bare letters would otherwise just type in the editor)."""
+
+    BINDINGS = [
+        Binding("n", "app.search_next", "Next", show=False),
+        Binding("p", "app.search_prev", "Prev", show=False),
+        Binding("escape", "app.search_close", "Close", show=False),
+    ]
+
+
 # Editor / preview width ratios, cycled Splitmark-style.
 RATIOS = [(3, 1), (1, 1), (1, 3)]
 RATIO_LABELS = ["75/25", "50/50", "25/75"]
-VIEW_MODES = ["split", "editor", "preview"]          # split, full editor, full viewer
+# split, full editor, full viewer, then maximized (no header/hints) variants.
+VIEW_MODES = ["split", "editor", "max-editor", "preview", "max-preview"]
 # Split rotations (Ctrl+B): (layout orientation, editor placed last). Cycles the
 # split a quarter turn each press: editor left -> top -> right -> bottom.
 ROTATIONS = [("horizontal", False), ("vertical", False),
@@ -435,10 +636,16 @@ ROTATIONS = [("horizontal", False), ("vertical", False),
 ROTATION_LABELS = ["left", "top", "right", "bottom"]  # where the editor sits
 
 # Shortcut hint boxes (rendered with console markup).
-GENERAL_HINTS = ("[b]^s[/b] Save  [b]^e[/b] Files  [b]^g[/b] Focus  [b]^f[/b] View  "
-                 "[b]^b[/b] Rotate  [b]^w[/b] Ratio  [b]^o[/b] Mode  [b]^p[/b] Palette  [b]^q[/b] Quit")
+# Split so the preview-only shortcuts (view/rotate/ratio) can be dropped for files
+# with no preview (anything other than markdown or PDF).
+_HINTS_HEAD = ("[b]^s[/b] Save  [b]^c/^v/^x[/b] Copy/Paste/Cut  [b]^k[/b] Del-line  "
+               "[b]^r[/b] Search  [b]^e[/b] Files  [b]^g[/b] Focus  ")
+_HINTS_PREVIEW = "[b]^f[/b] View  [b]^b[/b] Rotate  [b]^w[/b] Width  "
+_HINTS_TAIL = "[b]^o[/b] Mode  [b]^p[/b] Palette  [b]^q[/b] Quit"
+GENERAL_HINTS = _HINTS_HEAD + _HINTS_PREVIEW + _HINTS_TAIL
+GENERAL_HINTS_NO_PREVIEW = _HINTS_HEAD + _HINTS_TAIL
 BROWSER_HINTS = ("[b]Enter[/b] Open  [b]->/<-[/b] Expand  [b]Del[/b] Up  [b]^h[/b] Hidden  "
-                 "[b]n[/b] New  [b]d[/b] Dir  [b]r[/b] Rename  [b]Esc[/b] Close")
+                 "[b]n[/b] New  [b]d[/b] Dir  [b]r[/b] Rename  [b]i[/b] Info  [b]Esc[/b] Close")
 
 # File extension -> tree-sitter language name (built-in Textual set + language pack).
 EXT_LANG = {
@@ -622,6 +829,8 @@ class SdfApp(App):
         padding: 0 1;
         color: $text-muted;
         background: $surface;
+        text-wrap: nowrap;         /* keep the hints on a single line ... */
+        text-overflow: ellipsis;   /* ... and trail off with an ellipsis when too narrow */
     }
     #hints-general { width: 1fr; border-title-color: $accent; }
     #hints-files {
@@ -630,6 +839,24 @@ class SdfApp(App):
         border-title-color: $success;
         display: none;
     }
+    /* Search bar: takes the place of the Keys box (bottom-left) while searching. */
+    #search-box {
+        width: 1fr;
+        height: 3;
+        border: round $accent;
+        border-title-style: bold;
+        border-title-color: $accent;
+        padding: 0 1;
+        background: $surface;
+        display: none;
+    }
+    #search-input {
+        height: 1;
+        border: none;
+        padding: 0;
+        background: transparent;
+    }
+    #search-status { height: 1; color: $text-muted; }
 
     /* Remove the clickable header icon; the command palette stays on ctrl+p. */
     HeaderIcon { display: none; }
@@ -658,16 +885,22 @@ class SdfApp(App):
         background: $surface;
     }
 
-    /* Modal dialogs */
-    ConflictScreen, UnsavedScreen { align: center middle; }
+    /* Modal dialogs: always centered, with a dimmed backdrop behind. */
+    PromptScreen, InfoScreen, ConflictScreen, UnsavedScreen,
+    MarkdownTagScreen, FilePickScreen {
+        align: center middle;
+        background: $background 55%;
+    }
 
     #dialog {
         width: auto;
         min-width: 56;
         max-width: 80%;
         height: auto;
-        padding: 2 4;
+        padding: 1 3;
         border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
         background: $surface;
     }
 
@@ -684,9 +917,48 @@ class SdfApp(App):
     }
 
     #dialog > .dhint {
+        width: 100%;
+        text-align: center;
+        margin-top: 1;
         margin-bottom: 0;
         color: $text-muted;
     }
+    #dialog > .info {
+        width: 100%;
+        text-align: left;
+        color: $text;
+        margin-bottom: 0;
+    }
+    #dialog Input {
+        margin-top: 1;
+        border: round $primary;
+    }
+    #dialog Input:focus { border: round $accent; }
+
+    /* Markdown-tag picker + modal file browser. */
+    #tag-list {
+        height: auto;
+        max-height: 12;
+        border: round $primary;
+        background: $surface;
+        scrollbar-size: 0 0;      /* no side slider; '...' shows there is more */
+    }
+    #tag-list:focus { border: round $accent; }
+    #tag-list > ListItem { padding: 0 1; }
+    #tag-more-top, #tag-more-bottom {
+        width: 100%;
+        height: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    #pick-tree {
+        height: 18;
+        min-width: 60;
+        border: round $primary;
+        background: $surface;
+        scrollbar-size: 0 0;
+    }
+    #pick-tree:focus { border: round $accent; }
     """
 
     # priority=True: these global-chrome shortcuts must win over the focused
@@ -698,16 +970,22 @@ class SdfApp(App):
         Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("ctrl+c", "request_quit", "Quit", priority=True, show=False),
+        Binding("ctrl+shift+c", "copy_selection", "Copy", priority=True, show=False),
+        Binding("ctrl+shift+v", "paste_clipboard", "Paste", priority=True, show=False),
         # Panels
         Binding("ctrl+e", "toggle_tree", "Files", priority=True),
         # Ctrl+Tab is indistinguishable from Tab in a terminal, so use Ctrl+G / F6.
         Binding("ctrl+g", "cycle_focus", "Focus", priority=True),
         Binding("f6", "cycle_focus", "Focus", priority=True, show=False),
         Binding("escape", "focus_editor", "Editor", show=False),
+        # Search (vim-like: type, then n / p / Esc). Ctrl+F is the view cycle, so
+        # search is Ctrl+R (as in Recherche). n / p navigation is handled by the
+        # focused search-status widget, so bare letters still type in the editor.
+        Binding("ctrl+r", "search", "Search", priority=True),
         # Layout / appearance
         Binding("ctrl+f", "cycle_view", "View", priority=True),
         Binding("ctrl+b", "rotate", "Rotate", priority=True),
-        Binding("ctrl+w", "cycle_ratio", "Ratio", priority=True),
+        Binding("ctrl+w", "cycle_ratio", "Width", priority=True),
         # Behavior
         Binding("ctrl+o", "toggle_conflict_mode", "Mode", priority=True),
         # (transparency lives in the command palette, ctrl+p)
@@ -741,6 +1019,12 @@ class SdfApp(App):
         self._preview_timer = None
         self._ui_ready = False  # ignore tree events until the mount completes
         self._quit_armed = False  # double ctrl+c to quit
+        # Search state (vim-like: type, then n / p / Esc).
+        self._search_active = False   # search bar shown (replaces the Keys box)
+        self._search_nav = False      # confirmed: n / p navigate matches
+        self._search_query = ""
+        self._search_offsets: list[int] = []   # char offsets of each match
+        self._search_idx = -1
         self._registered_langs: set[str] = set()  # tree-sitter languages already registered
 
     # ------------------------------------------------------------------ UI
@@ -763,6 +1047,9 @@ class SdfApp(App):
                     yield Markdown("", id="preview-md", parser_factory=_md_parser)
         with Horizontal(id="hints"):
             yield Static(GENERAL_HINTS, id="hints-general")
+            with Container(id="search-box"):
+                yield Input(placeholder="type to search, Enter to browse", id="search-input")
+                yield SearchNav("", id="search-status")
             yield Static(BROWSER_HINTS, id="hints-files")
 
     def on_mount(self) -> None:
@@ -780,10 +1067,15 @@ class SdfApp(App):
         self.sidebar.border_title = f"Files: {Path(self._tree_root()).name or '/'}"
         self.panes = self.query_one("#panes", Container)
         self._header = self.query_one(Header)
+        self._hints = self.query_one("#hints", Horizontal)
         self._hints_general = self.query_one("#hints-general", Static)
         self._hints_files = self.query_one("#hints-files", Static)
         self._hints_general.border_title = "Keys"
         self._hints_files.border_title = "Browser"
+        self._search_box = self.query_one("#search-box", Container)
+        self._search_input = self.query_one("#search-input", Input)
+        self._search_status = self.query_one("#search-status", SearchNav)
+        self._search_box.border_title = "Search"
         self._base_screen = self.screen
         # Theme: CLI override, else config, else the gruvbox default.
         theme = self._cli_theme if self._cli_theme in self.available_themes \
@@ -840,6 +1132,10 @@ class SdfApp(App):
                             self.action_toggle_scroll_sync)
         yield SystemCommand("Toggle comment", "Comment / uncomment the selected lines (Ctrl+/)",
                             self.editor.action_toggle_comment)
+        if self._preview_kind == "markdown" and not self.editor.read_only:
+            yield SystemCommand("Insert markdown tag",
+                                "Insert a markdown snippet: list, link, image, table, ...",
+                                self.action_markdown_tag)
 
     def format_title(self, title: str, sub_title: str) -> Content:
         """Header title joined with spaces instead of the default em dash."""
@@ -1116,6 +1412,91 @@ class SdfApp(App):
         if current.parent != current:
             self._set_tree_root(current.parent)
 
+    def action_tree_info(self) -> None:
+        """Popup with details about the selected node (the '..' root shows the folder)."""
+        node = self.filetree.cursor_node
+        if node is not None and node.parent is not None and node.data is not None:
+            target = Path(node.data.path)
+        else:
+            target = Path(self.filetree.path)   # '..' root or nothing selected: the current folder
+        self.push_screen(InfoScreen(target))
+
+    # --------------------------------------------------- markdown snippets
+    def action_markdown_tag(self) -> None:
+        """Open the markdown-tag picker (palette command, markdown files only)."""
+        if self._preview_kind != "markdown":
+            self.notify("Markdown tags are only for markdown files", severity="warning", timeout=2)
+            return
+        if self.editor.read_only:
+            return
+        self.push_screen(MarkdownTagScreen(), self._on_markdown_tag)
+
+    def _on_markdown_tag(self, label: str) -> None:
+        if not label:
+            self.editor.focus()
+            return
+        snippet = _MD_TAG_MAP.get(label, "")
+        selection = self.editor.selected_text
+        if snippet in ("@link", "@image"):
+            kind = "image" if snippet == "@image" else "link"
+            start = self._path.parent if self._path else Path.cwd()
+            self.push_screen(FilePickScreen(start),
+                             lambda p: self._insert_file_link(kind, p, selection))
+            return
+        self._insert_markdown(self._build_snippet(label, selection))
+
+    def _build_snippet(self, label: str, sel: str) -> str:
+        """Wrap the current selection when there is one, else the placeholder snippet."""
+        if not sel:
+            return _MD_TAG_MAP.get(label, "")
+        lines = sel.split("\n")
+        wrappers = {
+            "Bold": f"**{sel}**",
+            "Italic": f"*{sel}*",
+            "Inline Code": f"`{sel}`",
+            "Code Block": f"```\n{sel}\n```",
+            "Heading": f"# {sel}",
+            "Blockquote": "\n".join(f"> {ln}" for ln in lines),
+            "Unordered List": "\n".join(f"- {ln}" for ln in lines),
+            "Ordered List": "\n".join(f"{i + 1}. {ln}" for i, ln in enumerate(lines)),
+            "Task List": "\n".join(f"- [ ] {ln}" for ln in lines),
+        }
+        # Link/Image handled via the file picker; others (Table, HR, Footnote) ignore the
+        # selection and fall back to their default snippet.
+        return wrappers.get(label, _MD_TAG_MAP.get(label, ""))
+
+    def _insert_file_link(self, kind: str, path: Path | None, text: str = "") -> None:
+        if path is None:
+            self.editor.focus()
+            return
+        rel = self._md_relpath(path)
+        label = text or ("alt" if kind == "image" else "text")
+        self._insert_markdown(f"![{label}]({rel})" if kind == "image" else f"[{label}]({rel})")
+
+    def _md_relpath(self, target: Path) -> str:
+        """Path of `target` relative to the markdown file's folder (./sub, ../up)."""
+        base = (self._path.parent if self._path else Path.cwd()).resolve()
+        try:
+            rel = os.path.relpath(target.resolve(), base)
+        except ValueError:            # different drive on Windows: keep absolute
+            return str(target)
+        rel = rel.replace(os.sep, "/")
+        if rel != ".." and not rel.startswith("../"):
+            rel = "./" + rel
+        return rel
+
+    def _insert_markdown(self, text: str) -> None:
+        if not text:
+            return
+        ed = self.editor
+        ed.focus()
+        sel = ed.selection
+        if sel.start != sel.end:                       # replace the selection in place
+            lo, hi = sorted((sel.start, sel.end))
+            ed.replace(text, lo, hi)
+        else:
+            ed.insert(text)
+
     # ------------------------------------------------------- tree file ops
     def _tree_base_dir(self) -> Path:
         """Directory to create into: the selected folder, or the parent of the
@@ -1187,7 +1568,10 @@ class SdfApp(App):
 
     # -------------------------------------------------------------- actions
     def action_request_quit(self) -> None:
-        """Double ctrl+c to quit (single press just arms it for a moment)."""
+        """Ctrl+C copies the editor selection; with no selection, double-press quits."""
+        if self.editor.has_focus and self.editor.selected_text:
+            self.action_copy_selection()
+            return
         if self._quit_armed:
             self.exit()
             return
@@ -1197,6 +1581,19 @@ class SdfApp(App):
 
     def _disarm_quit(self) -> None:
         self._quit_armed = False
+
+    def action_copy_selection(self) -> None:
+        """Copy the editor's selection to the system clipboard (OSC 52)."""
+        text = self.editor.selected_text
+        if text:
+            self.copy_to_clipboard(text)
+            self.notify("Copied", timeout=1)
+
+    def action_paste_clipboard(self) -> None:
+        """Paste into the editor (also reachable via the terminal's own paste)."""
+        if not self.editor.read_only:
+            self.editor.focus()
+            self.editor.action_paste()
 
     def action_save(self) -> bool:
         """Return True if the disk write succeeded. (A Textual action may return
@@ -1223,7 +1620,7 @@ class SdfApp(App):
     def action_cycle_view(self) -> None:
         self._view_mode = VIEW_MODES[(VIEW_MODES.index(self._view_mode) + 1) % len(VIEW_MODES)]
         self._apply_layout()
-        if self._view_mode == "preview":
+        if self._view_mode in ("preview", "max-preview") and self.preview_scroll.display:
             self.preview_scroll.focus()
         else:
             self.editor.focus()
@@ -1261,12 +1658,110 @@ class SdfApp(App):
             self.action_toggle_tree()
 
     def action_focus_editor(self) -> None:
-        """Escape from the preview returns to the editor (never get stuck there)."""
+        """Escape closes the search bar first, else returns from the preview to the editor."""
+        if self._search_active:
+            self._close_search()
+            return
         if self.focused is not None and self.preview_scroll in self.focused.ancestors_with_self:
             if self.editor.display:
                 self.editor.focus()
             else:
                 self.action_cycle_view()  # preview-only: bring the editor back
+
+    # ---------------------------------------------------------- search
+    def action_search(self) -> None:
+        """Open the vim-like search bar (replaces the Keys box, bottom-left)."""
+        self._search_active = True
+        self._search_nav = False
+        self._hints_general.display = False
+        self._search_box.display = True
+        self._search_status.display = False
+        self._search_input.display = True
+        self._search_input.value = self._search_query
+        self._search_input.focus()
+        if self._search_query:
+            self._run_search(self._search_query)
+
+    def action_search_close(self) -> None:
+        self._close_search()
+
+    def _close_search(self) -> None:
+        self._search_active = False
+        self._search_nav = False
+        self._search_box.display = False
+        self._hints_general.display = True
+        self.editor.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "search-input":
+            self._run_search(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "search-input":
+            return
+        if not self._search_offsets:
+            self.bell()
+            return
+        # Confirm: focus the status line so n / p / Esc navigate (bare letters would
+        # otherwise type in the editor). The editor keeps the current match selected.
+        self._search_nav = True
+        self._search_input.display = False
+        self._search_status.display = True
+        self._update_search_status()
+        self._search_status.focus()
+        self._highlight_current()
+
+    def _run_search(self, query: str) -> None:
+        self._search_query = query
+        text = self.editor.text
+        offsets: list[int] = []
+        if query:
+            low, q, i = text.lower(), query.lower(), 0
+            while (j := low.find(q, i)) >= 0:
+                offsets.append(j)
+                i = j + len(q)
+        self._search_offsets = offsets
+        self._search_idx = 0 if offsets else -1
+        self._highlight_current()
+        self._update_search_status()
+
+    def _offset_to_loc(self, off: int) -> tuple[int, int]:
+        text = self.editor.text
+        row = text.count("\n", 0, off)
+        col = off - (text.rfind("\n", 0, off) + 1)
+        return (row, col)
+
+    def _highlight_current(self) -> None:
+        if self._search_idx < 0 or not self._search_offsets:
+            return
+        off = self._search_offsets[self._search_idx]
+        start = self._offset_to_loc(off)
+        end = self._offset_to_loc(off + len(self._search_query))
+        self.editor.selection = Selection(start, end)
+        try:
+            self.editor.scroll_cursor_visible(center=True)
+        except Exception:
+            pass
+
+    def _update_search_status(self) -> None:
+        q = escape(self._search_query)
+        if not self._search_offsets:
+            self._search_status.update(f"/{q}   [dim]no match[/dim]" if q else "[dim]type to search[/dim]")
+            return
+        pos = f"{self._search_idx + 1}/{len(self._search_offsets)}"
+        self._search_status.update(f"/{q}   [b]{pos}[/b]   [dim]n next  p prev  Esc close[/dim]")
+
+    def action_search_next(self) -> None:
+        if self._search_offsets:
+            self._search_idx = (self._search_idx + 1) % len(self._search_offsets)
+            self._highlight_current()
+            self._update_search_status()
+
+    def action_search_prev(self) -> None:
+        if self._search_offsets:
+            self._search_idx = (self._search_idx - 1) % len(self._search_offsets)
+            self._highlight_current()
+            self._update_search_status()
 
     def action_cycle_focus(self) -> None:
         """Move focus to the next visible panel (browser -> editor -> preview)."""
@@ -1300,8 +1795,20 @@ class SdfApp(App):
         self.notify(f"Transparency: {'on' if self._transparent else 'off'}", timeout=1.5)
 
     # --------------------------------------------------------------- layout
+    def _refresh_hints(self) -> None:
+        """Drop the view/rotate/ratio hints for files that have no preview."""
+        if hasattr(self, "_hints_general"):
+            has_preview = self._preview_kind is not None
+            self._hints_general.update(GENERAL_HINTS if has_preview else GENERAL_HINTS_NO_PREVIEW)
+
     def _apply_layout(self) -> None:
         pv = self.preview_scroll
+        mode = self._view_mode
+        self._refresh_hints()
+        # maximized modes drop the header and the hint bar for a clean full screen
+        maximized = mode in ("max-editor", "max-preview")
+        self._header.display = not maximized
+        self._hints.display = not maximized
         if self._preview_kind is None:
             # non-markdown file: no preview, editor takes the whole area
             pv.display = False
@@ -1310,16 +1817,17 @@ class SdfApp(App):
             self.editor.styles.height = "1fr"
             self._refresh_titles()
             return
-        mode = self._view_mode
-        self.editor.display = mode in ("split", "editor")
-        pv.display = mode in ("split", "preview")
-        if mode == "editor":
+        self.editor.display = mode in ("split", "editor", "max-editor")
+        pv.display = mode in ("split", "preview", "max-preview")
+        if mode in ("editor", "max-editor"):
             self.editor.styles.width = "1fr"
             self.editor.styles.height = "1fr"
+            self._refresh_titles()
             return
-        if mode == "preview":
+        if mode in ("preview", "max-preview"):
             pv.styles.width = "1fr"
             pv.styles.height = "1fr"
+            self._refresh_titles()
             return
         # split: honor rotation (orientation + editor placement) and ratio
         orient, editor_last = ROTATIONS[self._rotation % len(ROTATIONS)]

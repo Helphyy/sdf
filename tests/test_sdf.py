@@ -213,18 +213,32 @@ async def _features(tmpdir) -> None:
     async with appV.run_test() as pilot:
         await pilot.pause()
         assert appV.theme == "gruvbox", f"thème par défaut attendu gruvbox, obtenu {appV.theme}"
-        # split -> editor plein -> preview plein -> split
+        # split -> editor -> max-editor -> preview -> max-preview -> split
         assert appV._view_mode == "split"
         assert appV.editor.display and appV.preview_scroll.display
+        assert appV._header.display and appV._hints.display
         await pilot.press("ctrl+f")
         await pilot.pause()
         assert appV._view_mode == "editor" and appV.editor.display and not appV.preview_scroll.display
+        assert appV._header.display and appV._hints.display
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        # maximized editor: no header, no hint bar
+        assert appV._view_mode == "max-editor" and appV.editor.display and not appV.preview_scroll.display
+        assert not appV._header.display and not appV._hints.display
         await pilot.press("ctrl+f")
         await pilot.pause()
         assert appV._view_mode == "preview" and appV.preview_scroll.display and not appV.editor.display
+        assert appV._header.display and appV._hints.display
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        # maximized preview: no header, no hint bar
+        assert appV._view_mode == "max-preview" and appV.preview_scroll.display and not appV.editor.display
+        assert not appV._header.display and not appV._hints.display
         await pilot.press("ctrl+f")
         await pilot.pause()
         assert appV._view_mode == "split" and appV.editor.display and appV.preview_scroll.display
+        assert appV._header.display and appV._hints.display
 
     # --- Transparence: toggle on/off (via commande palette / action)
     appT = SdfApp(path=str(doc))
@@ -425,6 +439,134 @@ async def _features(tmpdir) -> None:
         await pilot.pause()
         assert Path(appO.filetree.path).name != "ops", "Entrée sur '..' doit remonter"
 
+    # --- Popup d'infos fichier/dossier (touche i)
+    from sdf.app import InfoScreen, _file_info_lines
+    idir = tmpdir / "infos"
+    idir.mkdir()
+    (idir / "note.md").write_text("# t\nl2\nl3\n", encoding="utf-8")
+    _dir, frows = _file_info_lines(idir / "note.md")
+    fmap = dict(frows)
+    assert not _dir and fmap["Type"].startswith("File") and fmap["Lines"] == "3", "infos fichier KO"
+    assert "Size" in fmap and "Modified" in fmap and "Perms" in fmap, "champs infos manquants"
+    ddir, drows = _file_info_lines(idir)
+    assert ddir and dict(drows)["Type"] == "Folder" and "Items" in dict(drows), "infos dossier KO"
+    appInfo = SdfApp(path=str(idir / "note.md"))
+    async with appInfo.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        appInfo.filetree.focus()
+        for _ in range(6):
+            cn = appInfo.filetree.cursor_node
+            if cn and cn.parent is not None and "note.md" in str(cn.label):
+                break
+            await pilot.press("down")
+            await pilot.pause()
+        await pilot.press("i")
+        await pilot.pause()
+        assert isinstance(appInfo.screen, InfoScreen), "la touche i n'ouvre pas la popup d'infos"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(appInfo.screen, InfoScreen), "Échap ne ferme pas la popup d'infos"
+
+    # --- Insertion de tags markdown + chemin relatif au .md
+    from sdf.app import MarkdownTagScreen, FilePickScreen
+    mroot = tmpdir / "mdtags"
+    (mroot / "Documents").mkdir(parents=True)
+    (mroot / "Documents" / "img.png").write_bytes(b"x")
+    (mroot / "up.png").write_bytes(b"x")
+    (mroot / "notes").mkdir()
+    (mroot / "notes" / "local.png").write_bytes(b"x")
+    mfile = mroot / "notes" / "doc.md"
+    mfile.write_text("# hi\n\n", encoding="utf-8")
+    appMd = SdfApp(path=str(mfile))
+    async with appMd.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        # chemins relatifs depuis notes/ : sous-dossier -> ./, remontée -> ../
+        assert appMd._md_relpath(mroot / "notes" / "local.png") == "./local.png", "chemin ./ KO"
+        assert appMd._md_relpath(mroot / "Documents" / "img.png") == "../Documents/img.png", "chemin ../sub KO"
+        assert appMd._md_relpath(mroot / "up.png") == "../up.png", "chemin ../ KO"
+        # insertion d'un snippet simple au curseur
+        appMd.editor.move_cursor((2, 0))
+        appMd._insert_markdown("- item")
+        assert appMd.editor.text.endswith("- item"), "insertion snippet KO"
+        # image/link insèrent le chemin relatif, l'annulation ne casse rien
+        appMd._insert_file_link("image", mroot / "Documents" / "img.png")
+        assert "![alt](../Documents/img.png)" in appMd.editor.text, "insertion image relative KO"
+        appMd._insert_file_link("link", None)  # annulation
+        # sélection englobée: gras, code block multi-lignes, alt d'image = sélection
+        from textual.widgets.text_area import Selection
+        appMd.editor.text = "hello world\n"
+        appMd.editor.selection = Selection((0, 0), (0, 5))
+        appMd._insert_markdown(appMd._build_snippet("Bold", appMd.editor.selected_text))
+        assert appMd.editor.text.startswith("**hello** world"), "gras sur sélection KO"
+        appMd.editor.text = "a\nb\n"
+        appMd.editor.selection = Selection((0, 0), (1, 1))
+        appMd._insert_markdown(appMd._build_snippet("Code Block", appMd.editor.selected_text))
+        assert appMd.editor.text.startswith("```\na\nb\n```"), "code block sur sélection KO"
+        appMd.editor.text = "logo"
+        appMd.editor.selection = Selection((0, 0), (0, 4))
+        appMd._insert_file_link("image", mroot / "Documents" / "img.png", appMd.editor.selected_text)
+        assert appMd.editor.text == "![logo](../Documents/img.png)", "alt d'image = sélection KO"
+        # sans sélection: placeholder par défaut
+        assert appMd._build_snippet("Bold", "") == "**bold**", "placeholder sans sélection KO"
+        # le picker s'ouvre pour Image (tag @image), simple pour Task List
+        appMd.action_markdown_tag()
+        await pilot.pause()
+        assert isinstance(appMd.screen, MarkdownTagScreen), "la palette n'ouvre pas le picker de tags"
+        appMd.screen.query_one("#tag-list").index = 3  # Image
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(appMd.screen, FilePickScreen), "Image doit ouvrir le file picker"
+        await pilot.press("escape")
+        await pilot.pause()
+    # sur un fichier non-markdown, la commande refuse d'ouvrir le picker
+    (mroot / "code.py").write_text("x=1\n", encoding="utf-8")
+    appMd2 = SdfApp(path=str(mroot / "code.py"))
+    async with appMd2.run_test(size=(120, 34)) as pilot:
+        await pilot.pause()
+        appMd2.action_markdown_tag()
+        await pilot.pause()
+        assert not isinstance(appMd2.screen, MarkdownTagScreen), "pas de tags markdown hors md"
+
+    # --- Recherche facon vim: Ctrl+R, saisie, n / p / Esc
+    (tmpdir / "find.md").write_text("alpha beta\ngamma alpha\ndelta alpha end\n", encoding="utf-8")
+    appS = SdfApp(path=str(tmpdir / "find.md"))
+    async with appS.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert appS._search_active and appS._search_input.has_focus, "Ctrl+R n'ouvre pas la recherche"
+        assert not appS._hints_general.display and appS._search_box.display, "la barre search ne remplace pas Keys"
+        for ch in "alpha":
+            await pilot.press(ch)
+        await pilot.pause()
+        assert appS._search_offsets == [0, 17, 29], "matches KO"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert appS._search_nav and appS._search_status.has_focus, "Enter ne passe pas en navigation"
+        await pilot.press("n")
+        await pilot.pause()
+        assert appS._search_idx == 1, "n (next) KO"
+        await pilot.press("n")
+        await pilot.press("n")  # wrap
+        await pilot.pause()
+        assert appS._search_idx == 0, "n ne boucle pas"
+        await pilot.press("p")
+        await pilot.pause()
+        assert appS._search_idx == 2, "p (prev) KO"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not appS._search_active and appS._hints_general.display, "Esc ne ferme pas la recherche"
+        assert appS.editor.text.startswith("alpha beta"), "la recherche a modifié le buffer"
+        # hors recherche, n / p s'écrivent normalement
+        appS.editor.text = ""
+        appS.editor.focus()
+        await pilot.press("n")
+        await pilot.press("p")
+        await pilot.pause()
+        assert appS.editor.text == "np", "n/p doivent s'écrire hors recherche"
+
     # --- Scroll sync bidirectionnel + toggle + bordure focus
     long_md = "\n".join(f"## Section {i}\n\nParagraphe {i} de remplissage.\n" for i in range(40))
     (tmpdir / "long.md").write_text(long_md, encoding="utf-8")
@@ -493,14 +635,20 @@ async def _features(tmpdir) -> None:
     async with appPv.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         assert appPv._preview_kind == "markdown" and appPv.preview_scroll.display
+        hints_md = str(appPv._hints_general.render())
+        assert "Rotate" in hints_md and "Width" in hints_md, "md doit montrer les hints preview"
         appPv._load_file(tmpdir / "code.py")
         await pilot.pause()
         assert appPv._preview_kind is None and not appPv.preview_scroll.display, \
             "la preview doit disparaître pour un fichier non-md"
         assert appPv.editor.display and not appPv.editor.read_only
+        hints_py = str(appPv._hints_general.render())
+        assert "Rotate" not in hints_py and "Width" not in hints_py and "^f" not in hints_py, \
+            "les hints View/Rotate/Width doivent disparaître sans preview"
         appPv._load_file(tmpdir / "doc.pdf")
         await pilot.pause()
         assert appPv._preview_kind == "pdf" and appPv.preview_scroll.display, "pdf doit garder un preview"
+        assert "Rotate" in str(appPv._hints_general.render()), "un pdf doit re-montrer les hints preview"
         assert appPv.editor.read_only, "un pdf doit être en lecture seule"
         assert appPv.action_save() is False, "sauver un pdf (read-only) doit être bloqué"
 
@@ -666,6 +814,27 @@ async def _features(tmpdir) -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert focused_panel() == "editor", "Échap depuis preview doit revenir à l'éditeur"
+
+    # --- Copie: Ctrl+C copie la sélection (sans quitter), sinon arme le quit
+    appCp = SdfApp(path=str(tmpdir / "code.py"))
+    async with appCp.run_test(size=(100, 25)) as pilot:
+        await pilot.pause()
+        e = appCp.editor
+        e.focus()
+        e.load_text("hello world\n")
+        copied = []
+        appCp.copy_to_clipboard = lambda t: copied.append(t)
+        e.selection = Selection((0, 0), (0, 5))  # "hello"
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert copied == ["hello"] and appCp.is_running and not appCp._quit_armed, \
+            f"ctrl+c doit copier la sélection: {copied}"
+        e.selection = Selection((0, 3), (0, 3))  # pas de sélection
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert appCp._quit_armed, "ctrl+c sans sélection doit armer le quit"
 
 
 if __name__ == "__main__":
